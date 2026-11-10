@@ -5,13 +5,40 @@ import sqlite3
 from datetime import timezone
 from contextlib import contextmanager
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+def saudi_today():
+    return datetime.now(ZoneInfo('Asia/Riyadh')).date().isoformat()
 from pathlib import Path
 
 DB_PATH = Path(__file__).with_name('smart_delivery.sqlite3')
 SLOT = 12
-AREAS = {'حي الروضة':(16.894,42.552),'حي النزهة':(16.920,42.568),'حي الشاطئ':(16.902,42.539),'حي السويس':(16.871,42.563),'حي المطار':(16.915,42.583),'حي الصفا':(16.885,42.583)}
-DRIVERS = [('أحمد','حي الروضة','حي النزهة'),('خالد','حي الشاطئ','حي السويس'),('ياسر','حي المطار','حي الصفا')]
-CLIENTS = [('عبدالله عسيري','حي الروضة',1,'صباحي'),('محمد الصميلي','حي الروضة',1,'صباحي'),('يحيى حكمي','حي النزهة',1,'مسائي'),('سعد القحطاني','حي الشاطئ',2,'صباحي'),('فيصل المالكي','حي السويس',2,'مسائي'),('سالم الدوسري','حي المطار',3,'صباحي'),('فهد الشهراني','حي الصفا',3,'مسائي')]
+AREAS = {
+    'حي الضيافة': (18.306, 42.742),
+    'حي الرصراص': (18.280, 42.730),
+    'حي العزيزية': (18.307, 42.720),
+    'حي الهميلة': (18.320, 42.760),
+    'حي الموسى': (18.289, 42.775),
+    'حي النخيل': (18.294, 42.747),
+}
+DRIVERS = [
+    ('أحمد', 'حي الضيافة', 'حي الرصراص'),
+    ('خالد', 'حي العزيزية', 'حي الهميلة'),
+    ('ياسر', 'حي الموسى', 'حي النخيل'),
+]
+CLIENTS = [
+    ('عبدالله عسيري','حي الضيافة',1,'صباحي'),
+    ('ماجد الشهراني','حي الضيافة',1,'صباحي'),
+    ('ناصر القحطاني','حي الضيافة',1,'صباحي'),
+    ('فارس الغامدي','حي الضيافة',1,'صباحي'),
+    ('محمد العسيري','حي الرصراص',1,'مسائي'),
+    ('سعد القحطاني','حي العزيزية',2,'صباحي'),
+    ('فيصل المالكي','حي العزيزية',2,'صباحي'),
+    ('خالد العتيبي','حي الهميلة',2,'مسائي'),
+    ('سالم الدوسري','حي الموسى',3,'صباحي'),
+    ('فهد الشهراني','حي الموسى',3,'صباحي'),
+    ('يحيى حكمي','حي النخيل',3,'مسائي'),
+]
 
 class LogicError(Exception): pass
 
@@ -40,7 +67,19 @@ def setup(path=DB_PATH):
             db.execute("ALTER TABLE shipments ADD COLUMN customer_note TEXT NOT NULL DEFAULT ''")
         if 'rescheduled_count' not in existing_columns:
             db.execute('ALTER TABLE shipments ADD COLUMN rescheduled_count INTEGER NOT NULL DEFAULT 0')
-        if not db.execute('SELECT 1 FROM settings').fetchone(): db.execute('INSERT INTO settings VALUES (?,?)',('today',datetime.now().date().isoformat()))
+        db.executescript('''
+        CREATE TABLE IF NOT EXISTS support_tickets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            shipment_id INTEGER NOT NULL REFERENCES shipments(id),
+            category TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            reply TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'جديدة',
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_tickets_shipment ON support_tickets(shipment_id);
+        ''')
+        if not db.execute('SELECT 1 FROM settings').fetchone(): db.execute('INSERT INTO settings VALUES (?,?)',('today',saudi_today()))
         if not db.execute('SELECT 1 FROM drivers').fetchone():
             for i,(name,m,e) in enumerate(DRIVERS,1): db.execute('INSERT INTO drivers VALUES (?,?,?,?)',(i,name,m,e))
         if not db.execute('SELECT 1 FROM shipments').fetchone(): _seed(db)
@@ -57,7 +96,7 @@ def _seed(db):
         lat+=(int.from_bytes(raw[:2],'big')/65535-.5)*.012
         lon+=(int.from_bytes(raw[2:4],'big')/65535-.5)*.012
         db.execute('INSERT INTO shipments(id,client,area,driver_id,period,status,slot,rating,delivery_date,lat,lon) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(i,name,area,driver,period,'pending',None,None,date,lat,lon))
-        _msg(db,i,'النظام',f'مرحبًا {name.split()[0]}، شحنتك جاهزة للتوصيل غدًا في {area}. اختر الوقت المناسب من الخيارات المتاحة أدناه.')
+        _msg(db,i,'النظام',f'مرحبا {name.split()[0]}، وصلت شحنتك إلى مركز توزيع خميس مشيط. يرجى اختيار موعد مناسب لتسليمها غدا إلى عنوانك المسجل.')
 
 def state(path=DB_PATH):
     with connect(path) as db:
@@ -69,14 +108,14 @@ def state(path=DB_PATH):
         return {'today':day,'shipments':shipments,'drivers':drivers,'messages':messages,'delays':delays,'slots':{str(s['id']):available(db,s) for s in shipments if s['status']=='pending'}, 'reschedule_slots':{str(s['id']):reschedule_options(db,s) for s in shipments if s['status']=='scheduled'}}
 
 def available(db,sh):
-    start,end=(540,780) if sh['period']=='صباحي' else (960,1260)
+    start,end=(540,660) if sh['period']=='صباحي' else (780,960)
     row=db.execute('SELECT minutes FROM delays WHERE driver_id=? AND delivery_date=?',(sh['driver_id'],sh['delivery_date'])).fetchone()
     offset=row['minutes'] if row else 0
-    occupied={r['slot'] for r in db.execute("SELECT slot FROM shipments WHERE driver_id=? AND delivery_date=? AND slot IS NOT NULL AND status!='cancelled'",(sh['driver_id'],sh['delivery_date']))}
-    return [{'minute':t+offset,'free':(t+offset) not in occupied} for t in range(start,end,SLOT) if t+offset+SLOT<=1380]
+    occupied=[r['slot'] for r in db.execute("SELECT slot FROM shipments WHERE driver_id=? AND delivery_date=? AND slot IS NOT NULL AND status!='cancelled'",(sh['driver_id'],sh['delivery_date']))]
+    return [{'minute':t+offset,'free':not any(t+offset < x+SLOT and t+offset+SLOT > x for x in occupied)} for t in range(start,end,SLOT) if t+offset+SLOT<=end]
 
 def book(sid,minute,path=DB_PATH):
-    if type(minute) is not int: raise LogicError('اختر موعدًا صالحًا.')
+    if type(minute) is not int: raise LogicError('اختر موعدا صالحا.')
     with connect(path) as db:
         db.execute('BEGIN IMMEDIATE')
         sh=db.execute('SELECT * FROM shipments WHERE id=?',(sid,)).fetchone()
@@ -88,14 +127,15 @@ def book(sid,minute,path=DB_PATH):
         try: db.execute("UPDATE shipments SET status='scheduled',slot=? WHERE id=?",(minute,sid))
         except sqlite3.IntegrityError: raise LogicError('تم حجز الموعد من عميل آخر.')
         _msg(db,sid,'العميل',f'أرغب في استلام الشحنة من {label(minute)}.')
-        _msg(db,sid,'النظام',f'تم تأكيد موعدك بنجاح: {label(minute)}. شكرًا لتعاونك.')
+        _msg(db,sid,'النظام',f'تم تأكيد موعدك بنجاح: {label(minute)}. شكرا لتعاونك.')
 
 def label(minute):
     def f(n): return f'{n//60:02d}:{n%60:02d}'
     return f'{f(minute)} – {f(minute+SLOT)}'
 
 def _sim_now(db):
-    """Saudi current time when the simulation day is real today."""
+    'Current Saudi time when sim day is real today; otherwise midnight of sim day.'
+    from datetime import timezone
     saudi = timezone(timedelta(hours=3))
     real_now = datetime.now(saudi)
     day = db.execute("SELECT value FROM settings WHERE key='today'").fetchone()[0]
@@ -103,30 +143,33 @@ def _sim_now(db):
         return real_now
     return datetime.fromisoformat(day).replace(tzinfo=saudi)
 
+
 def _five_hours_left(db, sh):
+    from datetime import timezone
     saudi = timezone(timedelta(hours=3))
     delivery = datetime.fromisoformat(sh['delivery_date']).replace(tzinfo=saudi)
     delivery += timedelta(minutes=sh['slot'])
     return delivery - _sim_now(db) >= timedelta(hours=5)
 
+
 def reschedule_options(db, sh):
-    """Possible replacement slots; existing appointment remains reserved."""
+    'Return available substitute times; original slot stays reserved until confirmation.'
     if sh['status'] != 'scheduled' or sh['rescheduled_count'] >= 1 or not _five_hours_left(db, sh):
         return []
     choices = available(db, sh)
+    # Current booking remains in DB; only another free slot is allowed.
+    from datetime import timezone
     saudi = timezone(timedelta(hours=3))
     now = _sim_now(db)
-    return [
-        v for v in choices
-        if v['free'] and v['minute'] != sh['slot']
-        and datetime.fromisoformat(sh['delivery_date']).replace(tzinfo=saudi)
-        + timedelta(minutes=v['minute']) - now >= timedelta(hours=5)
-    ]
+    return [v for v in choices if v['free'] and v['minute'] != sh['slot']
+            and datetime.fromisoformat(sh['delivery_date']).replace(tzinfo=saudi)
+            + timedelta(minutes=v['minute']) - now >= timedelta(hours=5)]
+
 
 def reschedule(sid, minute, path=DB_PATH):
-    """Single atomic change, once, five hours before both appointments."""
+    'One atomic change, once per shipment, at least five hours before both slots.'
     if type(minute) is not int:
-        raise LogicError('اختر موعدًا صحيحًا.')
+        raise LogicError('اختر موعدا صحيحا.')
     with connect(path) as db:
         db.execute('BEGIN IMMEDIATE')
         sh = db.execute('SELECT * FROM shipments WHERE id=?', (sid,)).fetchone()
@@ -135,76 +178,50 @@ def reschedule(sid, minute, path=DB_PATH):
         if sh['rescheduled_count'] >= 1:
             raise LogicError('استخدمت محاولة تغيير الموعد الوحيدة لهذه الشحنة.')
         if not _five_hours_left(db, sh):
-            raise LogicError('يُسمح بالتغيير قبل الموعد بخمس ساعات على الأقل.')
+            raise LogicError('يسمح بالتغيير قبل الموعد بخمس ساعات على الأقل.')
         valid = {v['minute'] for v in reschedule_options(db, sh)}
         if minute not in valid:
             raise LogicError('الموعد الجديد غير متاح أو يقل عن خمس ساعات من الآن.')
         old_slot = sh['slot']
         try:
-            db.execute(
-                'UPDATE shipments SET slot=?, rescheduled_count=1 WHERE id=?',
-                (minute, sid)
-            )
+            db.execute('UPDATE shipments SET slot=?, rescheduled_count=1 WHERE id=?', (minute, sid))
         except sqlite3.IntegrityError as exc:
-            raise LogicError('الموعد الجديد حُجز للتو، اختر موعدًا آخر.') from exc
+            raise LogicError('الموعد الجديد حجز للتو، اختر موعدا آخر.') from exc
         _msg(db, sid, 'العميل', f'طلبت تعديل الموعد من {label(old_slot)} إلى {label(minute)}.')
-        _msg(db, sid, 'النظام', f'تم اعتماد الموعد الجديد: {label(minute)}. استُخدمت محاولة التعديل الوحيدة.')
+        _msg(db, sid, 'النظام', f'تم اعتماد الموعد الجديد: {label(minute)}. استخدمت محاولة التعديل الوحيدة.')
+
 
 def delay_from(driver_id, sid, minutes=15, path=DB_PATH):
-    """Delay this customer and later bookings in the same driver/day/period."""
-    if type(minutes) is not int or minutes not in (15, 30, 45, 60):
-        raise LogicError('اختر تأخيرًا صحيحًا.')
+    """Shift only later bookings, atomically; allow one-hour contingency buffer."""
+    if type(minutes) is not int or minutes not in (15,30,45,60):
+        raise LogicError('اختر مدة تأخير صحيحة.')
     with connect(path) as db:
         db.execute('BEGIN IMMEDIATE')
-        day = db.execute("SELECT value FROM settings WHERE key='today'").fetchone()[0]
-        target = db.execute(
-            'SELECT * FROM shipments WHERE id=? AND driver_id=?',
-            (sid, driver_id)
-        ).fetchone()
-        if not target or target['status'] != 'scheduled' or target['delivery_date'] != day:
-            raise LogicError('يمكن تسجيل التأخير لشحنة مجدولة في يوم توصيلها فقط.')
-        affected = list(db.execute(
-            """SELECT * FROM shipments
-               WHERE driver_id=? AND delivery_date=?
-                 AND period=? AND status='scheduled' AND slot>=?
-               ORDER BY slot,id""",
-            (driver_id, day, target['period'], target['slot'])
-        ))
+        day=db.execute("SELECT value FROM settings WHERE key='today'").fetchone()[0]
+        target=db.execute('SELECT * FROM shipments WHERE id=? AND driver_id=?',(sid,driver_id)).fetchone()
+        if not target or target['status']!='scheduled' or target['slot'] is None:
+            raise LogicError('اختر شحنة مجدولة أولا.')
+        if target['delivery_date'] != day:
+            raise LogicError('لا يمكن تسجيل التأخير إلا بعد بدء يوم التوصيل التجريبي.')
+        affected=list(db.execute("SELECT * FROM shipments WHERE driver_id=? AND delivery_date=? AND period=? AND status='scheduled' AND slot>? ORDER BY slot,id",(driver_id,target['delivery_date'],target['period'],target['slot'])))
         if not affected:
-            raise LogicError('لا توجد شحنات للتأخير.')
-        if any(sh['slot'] + minutes + SLOT > 1380 for sh in affected):
-            raise LogicError('التأخير يتجاوز نهاية جدول التوصيل.')
-        ids = [sh['id'] for sh in affected]
-        others = list(db.execute(
-            """SELECT slot FROM shipments
-               WHERE driver_id=? AND delivery_date=?
-                 AND slot IS NOT NULL AND status!='cancelled'
-                 AND id NOT IN ("""
-            + ','.join('?' * len(ids)) + ')',
-            [driver_id, day, *ids]
-        ))
+            raise LogicError('لا توجد شحنات مجدولة بعد هذه الشحنة في الفترة نفسها.')
+        normal_end=660 if target['period']=='صباحي' else 960
+        if any(s['slot']+minutes+SLOT>normal_end+60 for s in affected):
+            raise LogicError('مدة التأخير أكبر من الوقت الاحتياطي (60 دقيقة). اختر مدة أقصر.')
+        ids=[sh['id'] for sh in affected]
+        placeholders=','.join('?' for _ in ids)
+        others=list(db.execute("SELECT slot FROM shipments WHERE driver_id=? AND delivery_date=? AND slot IS NOT NULL AND status!='cancelled' AND id NOT IN ("+placeholders+")",(driver_id,target['delivery_date'],*ids)))
         for sh in affected:
-            next_slot = sh['slot'] + minutes
-            if any(
-                next_slot < other['slot'] + SLOT
-                and next_slot + SLOT > other['slot']
-                for other in others
-            ):
-                raise LogicError('التأخير يتعارض مع موعد سابق أو فترة أخرى؛ لم تتغير المواعيد.')
+            nxt=sh['slot']+minutes
+            if any(nxt < other['slot']+SLOT and nxt+SLOT > other['slot'] for other in others):
+                raise LogicError('التأخير يتعارض مع موعد آخر. اختر مدة أقل.')
         for sh in affected:
-            db.execute(
-                'UPDATE shipments SET slot=? WHERE id=?',
-                (-sh['slot'] - 1, sh['id'])
-            )
+            db.execute('UPDATE shipments SET slot=NULL WHERE id=?',(sh['id'],))
         for sh in affected:
-            db.execute(
-                'UPDATE shipments SET slot=? WHERE id=?',
-                (sh['slot'] + minutes, sh['id'])
-            )
-            _msg(
-                db, sh['id'], 'المندوب',
-                f'تنبيه: تأخر المندوب {minutes} دقيقة. موعدك الجديد {label(sh["slot"] + minutes)}.'
-            )
+            nxt=sh['slot']+minutes
+            db.execute('UPDATE shipments SET slot=? WHERE id=?',(nxt,sh['id']))
+            _msg(db,sh['id'],'المندوب',f'تنبيه: تأخر المندوب {minutes} دقيقة. موعدك السابق {label(sh["slot"])}، وموعدك الجديد {label(nxt)}. نعتذر عن التأخير.')
         return len(affected)
 
 def delay(driver_id,minutes,path=DB_PATH):
@@ -213,7 +230,7 @@ def delay(driver_id,minutes,path=DB_PATH):
         db.execute('BEGIN IMMEDIATE')
         day=db.execute("SELECT value FROM settings WHERE key='today'").fetchone()[0]
         rows=list(db.execute('SELECT * FROM shipments WHERE driver_id=? AND delivery_date=?',(driver_id,day)))
-        if not rows: raise LogicError('انتقل إلى يوم التوصيل أولًا.')
+        if not rows: raise LogicError('انتقل إلى يوم التوصيل أولا.')
         old=db.execute('SELECT minutes FROM delays WHERE driver_id=? AND delivery_date=?',(driver_id,day)).fetchone()
         delta=minutes-(old['minutes'] if old else 0)
         if not delta: return
@@ -234,14 +251,14 @@ def deliver(driver_id,sid,path=DB_PATH):
         _msg(db,sid,'المندوب','تم تسليم شحنتك بنجاح. يسعدنا تقييمك للخدمة.')
 
 def rate(sid,stars,path=DB_PATH):
-    if type(stars) is not int or stars not in range(1,6): raise LogicError('اختر تقييمًا صحيحًا.')
+    if type(stars) is not int or stars not in range(1,6): raise LogicError('اختر تقييما صحيحا.')
     with connect(path) as db:
         db.execute('BEGIN IMMEDIATE')
         sh=db.execute('SELECT * FROM shipments WHERE id=?',(sid,)).fetchone()
         if not sh or sh['status']!='delivered' or sh['rating']: raise LogicError('التقييم متاح بعد التسليم مرة واحدة.')
         db.execute('UPDATE shipments SET rating=? WHERE id=?',(stars,sid))
         _msg(db,sid,'العميل',f'تقييمي للخدمة: {stars} من 5.')
-        _msg(db,sid,'النظام','شكرًا لتقييمك!')
+        _msg(db,sid,'النظام','شكرا لتقييمك!')
 
 def advance(path=DB_PATH):
     with connect(path) as db:
@@ -254,13 +271,13 @@ def advance(path=DB_PATH):
 def reset(path=DB_PATH):
     with connect(path) as db:
         db.execute('BEGIN IMMEDIATE')
-        db.execute('DELETE FROM messages')
-        db.execute('DELETE FROM delays')
-        db.execute('DELETE FROM shipments')
-        db.execute("UPDATE settings SET value=? WHERE key='today'",(datetime.now().date().isoformat(),))
+        db.execute('DELETE FROM support_tickets');db.execute('DELETE FROM messages');db.execute('DELETE FROM delays');db.execute('DELETE FROM shipments')
+        db.execute("UPDATE settings SET value=? WHERE key='today'",(saudi_today(),))
         _seed(db)
 
+
 def save_customer_note(sid, note, path=DB_PATH):
+    """Keep a short delivery instruction with the shipment for the driver."""
     if type(sid) is not int:
         raise LogicError('رقم الشحنة غير صالح.')
     if not isinstance(note, str):
@@ -270,24 +287,19 @@ def save_customer_note(sid, note, path=DB_PATH):
         raise LogicError('الملاحظة يجب ألا تتجاوز 300 حرف.')
     with connect(path) as db:
         db.execute('BEGIN IMMEDIATE')
-        sh = db.execute(
-            'SELECT status, customer_note FROM shipments WHERE id=?',
-            (sid,)
-        ).fetchone()
+        sh = db.execute('SELECT status, customer_note FROM shipments WHERE id=?', (sid,)).fetchone()
         if not sh:
             raise LogicError('الشحنة غير موجودة.')
         if sh['status'] == 'delivered':
             raise LogicError('لا يمكن تعديل الملاحظة بعد التسليم.')
         if sh['customer_note'] == note:
             return
-        db.execute(
-            'UPDATE shipments SET customer_note=? WHERE id=?',
-            (note, sid)
-        )
+        db.execute('UPDATE shipments SET customer_note=? WHERE id=?', (note, sid))
         if note:
             _msg(db, sid, 'العميل', 'ملاحظة للتوصيل: ' + note)
         else:
             _msg(db, sid, 'العميل', 'تم حذف ملاحظة التوصيل السابقة.')
+
 
 def arrived(driver_id, sid, path=DB_PATH):
     """Send an arrival notification once; keep shipment scheduled."""
@@ -310,5 +322,87 @@ def arrived(driver_id, sid, path=DB_PATH):
             (sid,),
         ).fetchone()
         if already:
-            raise LogicError("أُرسل إشعار الوصول مسبقًا لهذه الشحنة.")
+            raise LogicError("أرسل إشعار الوصول مسبقا لهذه الشحنة.")
         _msg(db, sid, "المندوب", "وصل مندوب التوصيل إلى موقع التسليم.")
+
+
+TICKET_CATEGORIES = (
+    'تأخر موعد التوصيل', 'شحنتي لم تصل', 'استفسار عن سبب التأخير',
+    'مشكلة في حجز أو تعديل الموعد', 'تعذر التواصل مع المندوب', 'أخرى'
+)
+
+
+def customer_state(sid, path=DB_PATH):
+    """Only the selected shipment's information, never another customer's details."""
+    whole = state(path)
+    sh = next((s for s in whole['shipments'] if s['id'] == sid), None)
+    if not sh:
+        raise LogicError('الشحنة غير موجودة.')
+    with connect(path) as db:
+        tickets = [dict(x) for x in db.execute(
+            'SELECT id,category,description,reply,status,created_at FROM support_tickets WHERE shipment_id=? ORDER BY id DESC',
+            (sid,))]
+    return {
+        'today': whole['today'], 'shipment': sh,
+        'messages': whole['messages'].get(str(sid), []),
+        'slots': whole['slots'].get(str(sid), []),
+        'reschedule_slots': whole['reschedule_slots'].get(str(sid), []),
+        'tickets': tickets,
+        'slot_minutes': SLOT,
+    }
+
+
+def driver_state(driver_id, path=DB_PATH):
+    whole = state(path)
+    driver = next((d for d in whole['drivers'] if d['id'] == driver_id), None)
+    if driver is None:
+        raise LogicError('المندوب غير موجود.')
+    own = [s for s in whole['shipments'] if s['driver_id'] == driver_id and s['status'] in ('scheduled', 'delivered')]
+    return {'today': whole['today'], 'driver': driver, 'shipments': own, 'slot_minutes': SLOT}
+
+
+def create_ticket(sid, category, description, path=DB_PATH):
+    if category not in TICKET_CATEGORIES:
+        raise LogicError('اختر نوع مشكلة صحيحا.')
+    if not isinstance(description, str) or len(description.strip()) > 500:
+        raise LogicError('الوصف لا يتجاوز 500 حرف.')
+    with connect(path) as db:
+        db.execute('BEGIN IMMEDIATE')
+        sh=db.execute('SELECT * FROM shipments WHERE id=?',(sid,)).fetchone()
+        if not sh: raise LogicError('الشحنة غير موجودة.')
+        current = ('موعدك الحالي: '+label(sh['slot'])+'. ') if sh['slot'] is not None else 'لم يتم تأكيد موعد بعد. '
+        if category in ('تأخر موعد التوصيل','شحنتي لم تصل','استفسار عن سبب التأخير'):
+            reply = 'رد آلي تجريبي: تم استلام استفسارك. '+current+'يمكنك متابعة أحدث حالة للشحنة من هذه الصفحة.'
+        else:
+            reply = 'رد آلي تجريبي: تم تسجيل طلبك بنجاح، وسيظهر هنا في سجل التذاكر. لا يوجد موظف دعم حقيقي في المحاكاة.'
+        cur=db.execute('INSERT INTO support_tickets(shipment_id,category,description,reply,status,created_at) VALUES (?,?,?,?,?,?)',
+            (sid, category, description.strip(),reply,'جديدة',datetime.now().strftime('%Y-%m-%d %H:%M')))
+        _msg(db,sid,'الدعم الآلي',f'تم إنشاء تذكرة الدعم TKT-{cur.lastrowid:04d}. {reply}')
+        return {'ticket_no':f'TKT-{cur.lastrowid:04d}','reply':reply}
+
+
+def next_ticket_status(sid, ticket_id, path=DB_PATH):
+    with connect(path) as db:
+        db.execute('BEGIN IMMEDIATE')
+        row=db.execute('SELECT * FROM support_tickets WHERE shipment_id=? AND id=?',(sid,ticket_id)).fetchone()
+        if not row: raise LogicError('التذكرة غير موجودة.')
+        statuses=['جديدة','قيد المعالجة','تم الحل']
+        new=statuses[min(statuses.index(row['status'])+1,2)]
+        db.execute('UPDATE support_tickets SET status=? WHERE id=?',(new,ticket_id))
+        return new
+
+def staff_tickets(path=DB_PATH):
+    with connect(path) as db:
+        return [dict(row) for row in db.execute("SELECT t.id,t.shipment_id,t.category,t.description,t.reply,t.status,t.created_at,s.client,s.area,s.slot,s.delivery_date FROM support_tickets t JOIN shipments s ON s.id=t.shipment_id ORDER BY t.id DESC")]
+
+def staff_reply(ticket_id, status, reply, path=DB_PATH):
+    if status not in ('جديدة','قيد المعالجة','تم الحل'):
+        raise LogicError('حالة غير صحيحة.')
+    if not isinstance(reply,str) or not reply.strip() or len(reply.strip())>600:
+        raise LogicError('اكتب ردا لا يزيد عن 600 حرف.')
+    with connect(path) as db:
+        db.execute('BEGIN IMMEDIATE')
+        ticket=db.execute('SELECT * FROM support_tickets WHERE id=?',(ticket_id,)).fetchone()
+        if not ticket:raise LogicError('التذكرة غير موجودة.')
+        db.execute('UPDATE support_tickets SET status=?,reply=? WHERE id=?',(status,reply.strip(),ticket_id))
+        _msg(db,ticket['shipment_id'],'الدعم الفني',f'تحديث تذكرة TKT-{ticket_id:04d}: {status}. {reply.strip()}')

@@ -1,2 +1,3 @@
 Flask>=3.0,<4
-gunicorn
+gunicorn>=22,<25
+tzdata>=2025.1
